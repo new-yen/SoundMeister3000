@@ -37,35 +37,4 @@ This project transforms a Raspberry Pi Pico and the Pimoroni Pico RGB Keypad Bas
 
 **Project Files**
 - CircuitPython Code: See the code.py file in this repository for the full CircuitPython implementation. This is my initial code used to play some .mp3 audio files.
-- 
-
-3D Printable Housing: [Link to your 3D printing files on Printables/Thingiverse/etc.] - Add your actual link here!
-
-
-
-Here's the complete and updated post, including the "Project Files" section:
-
-Pico RGB Keypad Audio Player
-This project transforms the Pimoroni Pico RGB Keypad Base into a versatile soundboard, perfect for custom sound effects, musical notes, or even a fun toy for kids! It leverages the Raspberry Pi Pico's I2S capabilities for high-quality audio playback and features a vibrant, static rainbow LED display with key-press feedback.
-
-Objectives
-Create an interactive audio player: Play different MP3 files assigned to each of the 16 keys.
-Implement interruptible audio: Allow new audio files to interrupt currently playing ones, ensuring a responsive user experience.
-Develop a dynamic visual interface: Display a static rainbow LED pattern on the keypad and provide visual feedback (blinking) when a key is pressed.
-Utilize 3D-printed enclosures: Design and incorporate custom 3D-printed parts for a complete, durable, and aesthetically pleasing housing.
-Challenges
-Seamless Audio Playback: Initially, using a PWM amplifier resulted in significant noise and hissing. Switching to an I2S amplifier (MAX98357A) was crucial for achieving clean, high-fidelity audio.
-LED Brightness Control: Balancing the vibrancy of the rainbow pattern with overall power consumption and desired aesthetic led to the implementation of a brightness scaling factor.
-Code Optimization for Responsiveness: The main loop was designed to be non-blocking, allowing continuous monitoring of key presses even during audio playback.
-Hardware Used
-Raspberry Pi Pico: The heart of the project, providing the processing power and I2S audio capabilities.
-Raspberry Pi Pico
-Pimoroni Pico RGB Keypad Base: The 4x4 RGB keypad providing the tactile input and visual output.
-Pimoroni Pico RGB Keypad Base
-Adafruit I2S Stereo Class D Amplifier (MAX98357A): This amplifier significantly improved audio quality by leveraging the Pico's I2S output.
-Adafruit I2S Stereo Class D Amplifier - MAX98357A
-Pimoroni Mini Speaker - 4Ω 3W: A compact speaker suitable for this project.
-Pimoroni Mini Speaker - 4Ω 3W
-Project Files
-CircuitPython Code: See the code.py file in this repository for the full CircuitPython implementation.
-3D Printable Housing: [Link to your 3D printing files on Printables/Thingiverse/etc.] - Add your actual link here!
+- 3D Printable Housing: Link to my public Onshape document!
