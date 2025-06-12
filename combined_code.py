@@ -6,6 +6,7 @@ import audiobusio
 import synthio
 import array
 import gc
+import digitalio # digitalio is imported but not used for gain control, which is fine
 
 from pmk import PMK, number_to_xy, hsv_to_rgb
 from pmk.platform.rgbkeypadbase import RGBKeypadBase as Hardware
@@ -15,9 +16,9 @@ keybow = PMK(Hardware())
 keys = keybow.keys
 
 # --- Global Audio Setup (I2S) ---
-I2S_BCLK_PIN = board.GP0     # Bit Clock
-I2S_LRC_PIN = board.GP1      # Left-Right Clock (Word Select)
-I2S_DIN_PIN = board.GP2      # Data In
+I2S_BCLK_PIN = board.GP0      # Bit Clock
+I2S_LRC_PIN = board.GP1       # Left-Right Clock (Word Select)
+I2S_DIN_PIN = board.GP2       # Data In
 
 audio = audiobusio.I2SOut(I2S_BCLK_PIN, I2S_LRC_PIN, I2S_DIN_PIN)
 
@@ -31,12 +32,9 @@ AUDIO_FILES = [
 ]
 
 # --- GLOBAL MP3 DECODER INSTANCE ---
-# Create the MP3Decoder object once at startup.
-# It needs a file to initialize, so we use the first one.
-# This pre-allocates its large internal buffer.
 mp3_decoder = None
 try:
-    if AUDIO_FILES: # Ensure there's at least one file
+    if AUDIO_FILES:
         initial_mp3_path = AUDIO_FOLDER + AUDIO_FILES[0]
         mp3_decoder = audiomp3.MP3Decoder(open(initial_mp3_path, "rb"))
         print(f"MP3Decoder initialized with {initial_mp3_path}")
@@ -45,17 +43,13 @@ try:
 except Exception as e:
     print(f"!!! CRITICAL ERROR: Failed to initialize MP3Decoder globally: {e} !!!")
     print("Consider optimizing your MP3 files (smaller bitrate/samplerate) or using a board with more RAM.")
-    # In a non-error state, we might still want to print but allow program to continue if possible.
-    # For global init, if this fails, MP3 mode won't work, so a clear error is good.
 
 # --- Global Xylophone Waveforms (Generated once) ---
 _sine_waveform_full_volume = None
 _sine_waveform_overtone_volume = None
-# Removed: _sine_waveform_b15_quiet_volume = None
 
 def generate_sine_waveforms_globally():
     global _sine_waveform_full_volume, _sine_waveform_overtone_volume
-    # Only generate once
     if _sine_waveform_full_volume is None:
         def _gen_sine(length=512, scale=1.0):
             waveform = array.array("h", [0] * length)
@@ -65,8 +59,12 @@ def generate_sine_waveforms_globally():
         _sine_waveform_full_volume = _gen_sine(scale=1.0)
         _sine_waveform_overtone_volume = _gen_sine(scale=0.5)
 
-# Call this function once at program startup
 generate_sine_waveforms_globally()
+
+# --- NO LONGER NEEDED: Amplifier Gain Control Setup for GP3 ---
+# Since gain is hardwired to 12dB, GP3 control is removed.
+# You'll physically connect the MAX98357A's GAIN pin to GND.
+
 
 # --- Mode Switching Variables ---
 MODE_AUDIO_PLAYER = 0
@@ -74,22 +72,37 @@ MODE_XYLOPHONE = 1
 
 current_mode = MODE_AUDIO_PLAYER # Start with the audio player mode
 
-# Button 15 (bottom right key) is key_index 15
-BUTTON_SWITCH_KEY_INDEX = 15
+# --- Special Button Definitions ---
+BUTTON_SWITCH_KEY_INDEX = 15 # Bottom right key for mode switch
 
-# --- Long/Short Press Durations for Button 15 ---
+# A set of all special buttons for easy checking (only B15 remains special)
+SPECIAL_BUTTON_INDICES = {
+    BUTTON_SWITCH_KEY_INDEX,
+}
+
+# --- Long/Short Press Durations ---
 SHORT_PRESS_MAX_DURATION = 0.4 # Seconds - a press shorter than this is considered 'short'
-LONG_PRESS_MIN_DURATION = 1  # Seconds - a press longer than this is considered 'long'
+LONG_PRESS_MIN_DURATION = 1.0  # Seconds - a press longer than this is considered 'long'
 
-# Variables for tracking Button 15's press timing and sound state
-b15_press_start_time = 0.0
-prev_b15_state = False # Track previous state of button 15
-b15_active_synth_notes = None # To track synth notes for B15 if playing
+# --- Global Button State Tracking ---
+prev_key_states = [False] * 16 # Tracks previous state for ALL keys (for edge detection)
+
+# For special buttons, we also need to track the start time of their press
+special_button_press_start_times = {
+    idx: 0.0 for idx in SPECIAL_BUTTON_INDICES
+}
+
+# --- Global Audio/Synth State for Xylophone Mode ---
+_synth = None
+_active_notes = {} # Tracks active notes for ALL keys in Xylophone mode
+
+# Variables for tracking Button 15's MP3 sound state
 b15_is_playing_mp3 = False # To track if B15 MP3 is currently playing
 
+
 # --- LED Brightness Control ---
-MAX_LED_VALUE_AUDIO = 100 # Max brightness for Audio Player mode
-MAX_LED_VALUE_XYLOPHONE = 100 # Max brightness for Xylophone mode
+MAX_LED_VALUE_AUDIO = 75 # Max brightness for Audio Player mode
+MAX_LED_VALUE_XYLOPHONE = 75 # Max brightness for Xylophone mode
 
 def set_all_leds(r, g, b):
     """Sets all LEDs to a specific color."""
@@ -99,14 +112,13 @@ def set_all_leds(r, g, b):
 
 def flash_leds_white(times, delay):
     """Flashes all LEDs white for visual feedback."""
-    original_mode = current_mode # Store current mode to restore colors after flash
     for _ in range(times):
         set_all_leds(255, 255, 255)
         time.sleep(delay)
         set_all_leds(0, 0, 0) # Turn off
         time.sleep(delay)
-    # Restore original colors after flash
-    set_static_rainbow_colors(original_mode)
+    # Restore colors to reflect the current mode
+    set_static_rainbow_colors(current_mode) 
 
 def get_brightness_scaling_factor(mode):
     if mode == MODE_AUDIO_PLAYER:
@@ -115,315 +127,199 @@ def get_brightness_scaling_factor(mode):
         return MAX_LED_VALUE_XYLOPHONE / 255.0
     return 0.0 # Default
 
-def set_static_rainbow_colors(mode):
-    """Calculates and sets a static rainbow pattern on the keypad LEDs
-       based on the current mode's brightness setting."""
+def get_key_rainbow_color(key_index, mode):
+    """Calculates the static rainbow color for a single key based on mode."""
     brightness_scaling_factor = get_brightness_scaling_factor(mode)
+    x, y = number_to_xy(key_index)
+    hue = (x + y) / (7.0 if mode == MODE_AUDIO_PLAYER else 6.0)
+    hue = hue - math.floor(hue)
+    r, g, b = hsv_to_rgb(hue, 1, brightness_scaling_factor)
+    return r, g, b
+
+def set_static_rainbow_colors(mode):
+    """Calculates and sets a static rainbow pattern on the keypad LEDs for ALL keys."""
     for i in range(16):
-        x, y = number_to_xy(i)
-        # Adjust divisor for desired color spread, slightly different for each mode
-        hue = (x + y) / (7.0 if mode == MODE_AUDIO_PLAYER else 6.0)
-        hue = hue - math.floor(hue)
-        r, g, b = hsv_to_rgb(hue, 1, brightness_scaling_factor)
+        r, g, b = get_key_rainbow_color(i, mode)
         keys[i].set_led(r, g, b)
     keybow.update()
 
-# --- Code 1: MP3 Audio Player ---
-# Global state for audio player mode's key tracking
-_audio_player_prev_key_states = [False] * 16
+def flash_key_green(key_index, times=2, delay=0.05):
+    """Flashes a single key green for visual feedback, then restores its original color."""
+    original_r, original_g, original_b = get_key_rainbow_color(key_index, current_mode)
 
-# This function will now only handle keys 0-14
-def run_audio_player_other_keys():
-    global _audio_player_prev_key_states, mp3_decoder
-
-    set_static_rainbow_colors(MODE_AUDIO_PLAYER)
-
-    for key_index in range(16):
-        if key_index == BUTTON_SWITCH_KEY_INDEX: # Skip button 15, it's handled in main loop
-            _audio_player_prev_key_states[key_index] = keys[key_index].pressed # Still update its state
-            continue
-
-        key = keys[key_index]
-        current_pressed_state = key.pressed
-        previous_pressed_state = _audio_player_prev_key_states[key_index]
-
-        if current_pressed_state and not previous_pressed_state: # Key was just pressed
-            print(f"\n--- Key {key_index} pressed! (Audio Player) ---")
-
-            if key_index < len(AUDIO_FILES):
-                full_audio_path = AUDIO_FOLDER + AUDIO_FILES[key_index]
-                if mp3_decoder:
-                    try:
-                        audio.stop()
-                        gc.collect()
-                        mp3_decoder.file = open(full_audio_path, "rb")
-                        audio.play(mp3_decoder)
-                        keys[key_index].set_led(255,255,255) # Light up pressed key
-                        print(f"Playing {full_audio_path}")
-                    except Exception as e:
-                        print(f"!!! ERROR playing {full_audio_path}: {e} !!!")
-                        # No longer indicate global error state, just print and continue
-                else:
-                    print("MP3Decoder not initialized, cannot play audio.")
-            else:
-                print(f"No audio file defined for key {key_index}.")
-        elif not current_pressed_state and previous_pressed_state: # Key was just released
-            # Restore LED color for the released key
-            x, y = number_to_xy(key_index)
-            hue = (x + y) / 7.0
-            hue = hue - math.floor(hue)
-            r, g, b = hsv_to_rgb(hue, 1, get_brightness_scaling_factor(MODE_AUDIO_PLAYER))
-            keys[key_index].set_led(r, g, b)
-
-        _audio_player_prev_key_states[key_index] = current_pressed_state
-        time.sleep(0.001)
-
-
-# --- Code 2: Synthio Xylophone ---
-_synth = None
-_active_notes = {} # Tracks active notes for keys 0-14
-_xylophone_prev_key_states = [False] * 16
-_static_xylophone_key_colors = [None] * 16
-
-# This function will now only handle keys 0-14
-def run_xylophone_other_keys():
-    global _synth, _active_notes, _xylophone_prev_key_states, _static_xylophone_key_colors
-
-    # If synth is not initialized or was de-initialized
-    if _synth is None:
-        try:
-            gc.collect()
-            _synth = synthio.Synthesizer(channel_count=1, sample_rate=22050)
-            audio.play(_synth)
-            print("Synthesizer initialized and started playing.")
-        except Exception as e:
-            print(f"!!! ERROR initializing Synthesizer: {e} !!!")
-            # No longer indicate global error state, just print and return from this loop iteration
-            return
-    else:
-        if not audio.playing:
-            try:
-                audio.play(_synth)
-                print("Synthesizer resumed playing.")
-            except Exception as e:
-                print(f"!!! ERROR resuming Synthesizer: {e} !!!")
-                # No longer indicate global error state, just print and return from this loop iteration
-                return
-
-    # Envelopes remain local as they are small and tied to note creation
-    fundamental_envelope = synthio.Envelope(
-        attack_time=0.01, decay_time=0.2, sustain_level=0.1, release_time=0.2,
-    )
-    overtone_envelope = synthio.Envelope(
-        attack_time=0.01, decay_time=0.05, sustain_level=0.0, release_time=0.1,
-    )
-
-    MIDI_NOTES = [
-        48, 49, 50, 51,
-        52, 53, 54, 55,
-        56, 57, 58, 59,
-        60, 61, 62, 63,
-    ]
-
-    def set_xylophone_rainbow_colors():
-        brightness_scaling_factor = get_brightness_scaling_factor(MODE_XYLOPHONE)
-        for i in range(16):
-            x, y = number_to_xy(i)
-            hue = (x + y) / 6.0
-            hue = hue - math.floor(hue)
-            r, g, b = hsv_to_rgb(hue, 1, brightness_scaling_factor)
-            keys[i].set_led(r, g, b)
-            _static_xylophone_key_colors[i] = (r, g, b)
+    for _ in range(times):
+        keys[key_index].set_led(0, 255, 0) # Green
         keybow.update()
+        time.sleep(delay)
+        keys[key_index].set_led(0, 0, 0) # Off
+        keybow.update()
+        time.sleep(delay)
+    # Restore original color
+    keys[key_index].set_led(original_r, original_g, original_b)
+    keybow.update()
 
-    set_xylophone_rainbow_colors()
-
-    for key_index in range(16):
-        if key_index == BUTTON_SWITCH_KEY_INDEX: # Skip button 15, it's handled in main loop
-            _xylophone_prev_key_states[key_index] = keys[key_index].pressed # Still update its state
-            continue
-
-        key = keys[key_index]
-        current_pressed_state = key.pressed
-        previous_pressed_state = _xylophone_prev_key_states[key_index]
-
-        if current_pressed_state and not previous_pressed_state: # Key was just pressed (edge detection)
-            print(f"\n--- Key {key_index} pressed! (Xylophone) ---")
-            if key_index < len(MIDI_NOTES):
-                key.set_led(255, 255, 255) # Set LED to white when pressed
-
-                midi_note = MIDI_NOTES[key_index]
-                try:
-                    note_frequency = 440 * (2**((midi_note - 69) / 12))
-
-                    note_fundamental = synthio.Note(
-                        frequency=note_frequency,
-                        waveform=_sine_waveform_full_volume, # Using full volume waveform for general keys
-                        envelope=fundamental_envelope,
-                    )
-                    note_overtone1 = synthio.Note(
-                        frequency=note_frequency * 2.756,
-                        waveform=_sine_waveform_overtone_volume,
-                        envelope=overtone_envelope,
-                    )
-                    notes_to_play = [note_fundamental, note_overtone1]
-
-                    if key_index in _active_notes:
-                        _synth.release(_active_notes[key_index])
-                    
-                    _synth.press(notes_to_play)
-                    _active_notes[key_index] = notes_to_play
-
-                    print(f"Playing MIDI note {midi_note} (Key {key_index}), frequency {note_frequency:.2f} Hz")
-                except Exception as e:
-                    print(f"!!! ERROR playing MIDI note {midi_note} for Key {key_index}: {e} !!!")
-                    # No longer indicate global error state, just print and continue
-            else:
-                print(f"No MIDI note defined for key {key_index}.")
-
-        elif not current_pressed_state and previous_pressed_state: # Key was just released (edge detection)
-            print(f"--- Key {key_index} released! (Xylophone) ---")
-            r, g, b = _static_xylophone_key_colors[key_index]
-            key.set_led(r, g, b)
-
-            if key_index in _active_notes:
-                _synth.release(_active_notes[key_index])
-                del _active_notes[key_index]
-                print(f"Note released for Key {key_index}")
-        
-        _xylophone_prev_key_states[key_index] = current_pressed_state
-        time.sleep(0.001)
 
 # --- Main Program Loop ---
 print(f"Starting in Mode: {'Audio Player' if current_mode == MODE_AUDIO_PLAYER else 'Xylophone'}")
-flash_leds_white(2, 0.1)
+flash_leds_white(2, 0.1) # Initial feedback
+set_static_rainbow_colors(current_mode) # Set initial rainbow colors
 
 while True:
     keybow.update()
 
-    key_switch_button = keys[BUTTON_SWITCH_KEY_INDEX]
-    current_b15_state = key_switch_button.pressed
-    
-    # --- Button 15 Press Handling (Immediate Sound/Note) ---
-    if current_b15_state and not prev_b15_state: # Button 15 was just pressed
-        b15_press_start_time = time.monotonic()
-        print(f"Button {BUTTON_SWITCH_KEY_INDEX} pressed!")
+    for key_index in range(16):
+        current_pressed_state = keys[key_index].pressed
+        previous_pressed_state = prev_key_states[key_index]
 
-        # Always light up B15 LED on press
-        key_switch_button.set_led(255, 255, 255)
-
-        if current_mode == MODE_XYLOPHONE:
-            # IMPORTANT: Ensure synth is initialized if not already (e.g., if just switched from MP3 player)
-            if _synth is None:
-                try:
-                    gc.collect()
-                    _synth = synthio.Synthesizer(channel_count=1, sample_rate=22050)
-                    audio.play(_synth)
-                    print("Synthesizer initialized for B15 press.")
-                except Exception as e:
-                    print(f"!!! ERROR initializing Synthesizer for B15: {e} !!!")
-                    # No longer indicate global error state, just print and continue
-                    continue # Skip rest of this loop iteration if synth fails
-
-            # Play Xylophone note immediately
-            midi_note = 72 # C6
-            note_frequency = 440 * (2**((midi_note - 69) / 12))
+        # --- Handle Key Press (Edge Detection: Just Pressed) ---
+        if current_pressed_state and not previous_pressed_state:
+            keys[key_index].set_led(255, 255, 255) # Light up on press (white)
+            print(f"\n--- Key {key_index} pressed! ---")
             
-            # These envelopes are small enough to define here, or could be global if desired
-            fundamental_envelope = synthio.Envelope(attack_time=0.01, decay_time=0.2, sustain_level=0.1, release_time=0.2)
-            overtone_envelope = synthio.Envelope(attack_time=0.01, decay_time=0.05, sustain_level=0.0, release_time=0.1)
-
-            note_fundamental = synthio.Note(
-                frequency=note_frequency,
-                waveform=_sine_waveform_full_volume,
-                envelope=fundamental_envelope,
-            )
-            note_overtone1 = synthio.Note(
-                frequency=note_frequency * 2.756,
-                waveform=_sine_waveform_overtone_volume,
-                envelope=overtone_envelope,
-            )
-            b15_active_synth_notes = [note_fundamental, note_overtone1] # Store for release
-            _synth.press(b15_active_synth_notes)
-            print(f"Playing B15 MIDI note {midi_note} (on press).")
-
-        elif current_mode == MODE_AUDIO_PLAYER:
-            # Play MP3 immediately
-            full_audio_path = AUDIO_FOLDER + AUDIO_FILES[BUTTON_SWITCH_KEY_INDEX]
-            if mp3_decoder:
-                try:
-                    audio.stop()
-                    gc.collect()
-                    mp3_decoder.file = open(full_audio_path, "rb")
-                    audio.play(mp3_decoder)
-                    b15_is_playing_mp3 = True # Indicate B15 MP3 is active
-                    print(f"Playing B15 MP3 (on press): {full_audio_path}")
-                except Exception as e:
-                    print(f"!!! ERROR playing B15 MP3: {e} !!!")
-                    # No longer indicate global error state, just print and continue
-            else:
-                print("MP3Decoder not initialized, cannot play B15 MP3.")
-
-
-    # --- Button 15 Release Handling (Stop Sound or Switch Mode) ---
-    elif not current_b15_state and prev_b15_state: # Button 15 was just released
-        press_duration = time.monotonic() - b15_press_start_time
-        print(f"Button {BUTTON_SWITCH_KEY_INDEX} released. Duration: {press_duration:.3f}s")
-
-        # Restore B15 LED color based on current mode
-        x, y = number_to_xy(BUTTON_SWITCH_KEY_INDEX)
-        current_brightness_factor = get_brightness_scaling_factor(current_mode)
-        # Use specific hue based on current mode, similar to set_static_rainbow_colors
-        hue = (x + y) / (7.0 if current_mode == MODE_AUDIO_PLAYER else 6.0)
-        hue = hue - math.floor(hue)
-        r, g, b = hsv_to_rgb(hue, 1, current_brightness_factor)
-        key_switch_button.set_led(r, g, b)
-
-        if press_duration >= LONG_PRESS_MIN_DURATION:
-            # --- LONG PRESS: SWITCH MODE ---
-            print("Long press detected! Switching mode!")
-            audio.stop() # Stop any playing audio (including B15's initial sound)
+            # Store press start time for duration check for special keys
+            if key_index in SPECIAL_BUTTON_INDICES:
+                special_button_press_start_times[key_index] = time.monotonic()
             
-            # Clear B15 specific sound states
-            b15_active_synth_notes = None
-            b15_is_playing_mp3 = False
-
-            # If currently in Xylophone mode, explicitly release notes and de-initialize synth
-            if current_mode == MODE_XYLOPHONE:
-                if _synth is not None:
-                    _synth.release_all() # Release all notes from other keys too
-                    _active_notes.clear() # Clear tracking for other keys
-                    _synth = None # Force re-initialization of synth
-                    print("Synthesizer de-initialized for mode switch.")
-            
-            flash_leds_white(3, 0.05) # Visual feedback for mode switch
-
-            # Perform the mode switch
+            # --- Play Sound/Note on Press (for all keys, short press behavior) ---
             if current_mode == MODE_AUDIO_PLAYER:
-                current_mode = MODE_XYLOPHONE
-            else:
-                current_mode = MODE_AUDIO_PLAYER
+                if key_index < len(AUDIO_FILES):
+                    full_audio_path = AUDIO_FOLDER + AUDIO_FILES[key_index]
+                    if mp3_decoder:
+                        try:
+                            audio.stop()
+                            gc.collect()
+                            mp3_decoder.file = open(full_audio_path, "rb")
+                            audio.play(mp3_decoder)
+                            if key_index == BUTTON_SWITCH_KEY_INDEX: # For B15 specific flag
+                                b15_is_playing_mp3 = True
+                            print(f"Playing {full_audio_path}")
+                        except Exception as e:
+                            print(f"!!! ERROR playing {full_audio_path}: {e} !!!")
+                    else:
+                        print("MP3Decoder not initialized, cannot play audio.")
+                else:
+                    print(f"No audio file defined for key {key_index}.")
             
-            time.sleep(0.1) # Small delay after switch
+            elif current_mode == MODE_XYLOPHONE:
+                # Ensure synth is initialized and playing
+                if _synth is None or not audio.playing:
+                    try:
+                        gc.collect()
+                        _synth = synthio.Synthesizer(channel_count=1, sample_rate=22050)
+                        audio.play(_synth)
+                        print("Synthesizer initialized/resumed playing.")
+                    except Exception as e:
+                        print(f"!!! ERROR initializing/resuming Synthesizer: {e} !!!")
+                        _synth = None # Ensure it's marked as failed
+                        continue # Skip playing note if synth failed
+
+                if _synth: # Play note if synth is ready
+                    MIDI_NOTES = [
+                        48, 49, 50, 51,
+                        52, 53, 54, 55,
+                        56, 57, 58, 59,
+                        60, 61, 62, 63,
+                    ]
+                    # Specific MIDI note for B15 (mode switch)
+                    if key_index == BUTTON_SWITCH_KEY_INDEX:
+                        midi_note_to_play = 72 # C6 for B15
+                    elif key_index < len(MIDI_NOTES):
+                        midi_note_to_play = MIDI_NOTES[key_index]
+                    else:
+                        print(f"No MIDI note defined for key {key_index}.")
+                        continue
+
+                    try:
+                        note_frequency = 440 * (2**((midi_note_to_play - 69) / 12))
+                        fundamental_envelope = synthio.Envelope(attack_time=0.01, decay_time=0.2, sustain_level=0.1, release_time=0.2)
+                        overtone_envelope = synthio.Envelope(attack_time=0.01, decay_time=0.05, sustain_level=0.0, release_time=0.1)
+                        note_fundamental = synthio.Note(frequency=note_frequency, waveform=_sine_waveform_full_volume, envelope=fundamental_envelope)
+                        note_overtone1 = synthio.Note(frequency=note_frequency * 2.756, waveform=_sine_waveform_overtone_volume, envelope=overtone_envelope)
+                        
+                        notes_to_play = [note_fundamental, note_overtone1]
+                        
+                        # Release previous notes for this key if still active
+                        if key_index in _active_notes:
+                            _synth.release(_active_notes[key_index])
+                        
+                        _synth.press(notes_to_play)
+                        _active_notes[key_index] = notes_to_play # Store for release, for ALL keys
+                        print(f"Playing MIDI note {midi_note_to_play} (Key {key_index}), frequency {note_frequency:.2f} Hz")
+                    except Exception as e:
+                        print(f"!!! ERROR playing MIDI note {midi_note_to_play} for Key {key_index}: {e} !!!")
+
+
+        # --- Handle Key Release (Edge Detection: Just Released) ---
+        elif not current_pressed_state and previous_pressed_state:
+            # Restore LED color for the released key
+            r, g, b = get_key_rainbow_color(key_index, current_mode)
+            keys[key_index].set_led(r, g, b)
             
-        else: # press_duration < SHORT_PRESS_MAX_DURATION
-            # --- SHORT PRESS: Manage B15's sound/note (already playing from press) ---
-            print("Short press detected! Button 15's sound should have already started.")
-            if current_mode == MODE_XYLOPHONE and b15_active_synth_notes is not None:
-                _synth.release(b15_active_synth_notes)
-                b15_active_synth_notes = None # Clear active note reference
-            # For MP3, if it was started, it will continue playing until it finishes
-            # or is stopped by another button/mode switch.
-            b15_is_playing_mp3 = False # Reset MP3 playing flag for B15
+            # --- Special Button Long Press Detection and Action ---
+            if key_index in SPECIAL_BUTTON_INDICES:
+                press_duration = time.monotonic() - special_button_press_start_times[key_index]
+                print(f"Button {key_index} released. Duration: {press_duration:.3f}s")
 
+                if press_duration >= LONG_PRESS_MIN_DURATION:
+                    # --- LONG PRESS ACTION ---
+                    print(f"Long press detected for Button {key_index}!")
+                    if key_index == BUTTON_SWITCH_KEY_INDEX:
+                        print("Switching mode!")
+                        audio.stop() # Stop any playing audio
+                        # For B15, if it was playing synth, release it (it's in _active_notes now)
+                        if current_mode == MODE_XYLOPHONE and key_index in _active_notes:
+                            _synth.release(_active_notes[key_index])
+                            del _active_notes[key_index]
+                        b15_is_playing_mp3 = False # Reset MP3 playing flag
 
-    prev_b15_state = current_b15_state # Update the previous state for the next loop
+                        # If in Xylophone mode, explicitly release all notes and de-initialize synth
+                        if current_mode == MODE_XYLOPHONE:
+                            if _synth is not None:
+                                _synth.release_all()
+                                _active_notes.clear()
+                                _synth = None
+                                print("Synthesizer de-initialized for mode switch.")
+                        
+                        flash_leds_white(3, 0.05) # Visual feedback for mode switch
 
-    # --- Run the currently active mode's code for OTHER keys (0-14) ---
-    # These functions are now responsible ONLY for keys 0-14.
-    if current_mode == MODE_AUDIO_PLAYER:
-        run_audio_player_other_keys()
-    elif current_mode == MODE_XYLOPHONE:
-        run_xylophone_other_keys()
+                        # Perform the mode switch
+                        if current_mode == MODE_AUDIO_PLAYER:
+                            current_mode = MODE_XYLOPHONE
+                        else:
+                            current_mode = MODE_AUDIO_PLAYER
+                        set_static_rainbow_colors(current_mode) # Set new mode's colors
+                        time.sleep(0.1) # Small delay after switch
+                    
+                    # If any of these special keys were playing a synth note (and it was a long press), release it.
+                    if current_mode == MODE_XYLOPHONE and key_index in _active_notes:
+                        _synth.release(_active_notes[key_index])
+                        del _active_notes[key_index]
+                        print(f"Note released for Key {key_index} (due to long press).")
+
+                else:
+                    # --- SHORT PRESS RELEASE ACTION (for special buttons only) ---
+                    # For B15, if it was a short press, handle its Xylophone note release or MP3 flag reset.
+                    if key_index == BUTTON_SWITCH_KEY_INDEX:
+                        print("Short press detected for B15 (release).")
+                        if current_mode == MODE_XYLOPHONE and key_index in _active_notes: # Check if B15 has an active note
+                            _synth.release(_active_notes[key_index])
+                            del _active_notes[key_index] # Remove from active notes
+                            print(f"Note released for Key {key_index}.")
+                        b15_is_playing_mp3 = False # Reset MP3 playing flag for B15 (always, regardless of mode)
+                    
+                    elif current_mode == MODE_XYLOPHONE and key_index in _active_notes:
+                        _synth.release(_active_notes[key_index])
+                        del _active_notes[key_index]
+                        print(f"Note released for Key {key_index}.")
+            
+            else: # --- Regular Key Release (Keys 0-11) ---
+                print(f"--- Key {key_index} released! ---")
+                if current_mode == MODE_XYLOPHONE and key_index in _active_notes:
+                    _synth.release(_active_notes[key_index])
+                    del _active_notes[key_index]
+                    print(f"Note released for Key {key_index}")
+
+        # Update the previous state for the next loop iteration
+        prev_key_states[key_index] = current_pressed_state
     
     time.sleep(0.01) # Small sleep to yield to other tasks
