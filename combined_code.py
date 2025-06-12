@@ -79,7 +79,7 @@ BUTTON_SWITCH_KEY_INDEX = 15
 
 # --- Long/Short Press Durations for Button 15 ---
 SHORT_PRESS_MAX_DURATION = 0.4 # Seconds - a press shorter than this is considered 'short'
-LONG_PRESS_MIN_DURATION = 1.5  # Seconds - a press longer than this is considered 'long'
+LONG_PRESS_MIN_DURATION = 1  # Seconds - a press longer than this is considered 'long'
 
 # Variables for tracking Button 15's press timing and sound state
 b15_press_start_time = 0.0
