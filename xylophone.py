@@ -25,18 +25,18 @@ synth = synthio.Synthesizer(channel_count=1, sample_rate=44100)
 # Envelopes define how the volume of a sound changes over time (Attack, Decay, Sustain, Release).
 # Envelope for the fundamental (main) note, designed for a percussive attack and quick decay.
 fundamental_envelope = synthio.Envelope(
-    attack_time=0.01,   # Very fast attack
-    decay_time=0.2,     # Quick decay to sustain
-    sustain_level=0.1,  # Short sustain at low volume
-    release_time=0.2,   # Quicker fade out after key release
+    attack_time=0.01,
+    decay_time=0.2,
+    sustain_level=0.1,
+    release_time=0.2,
 )
 
 # Envelope for the inharmonic overtone, even shorter and sharper for a metallic "ping."
 overtone_envelope = synthio.Envelope(
-    attack_time=0.01,   # Very fast attack
-    decay_time=0.05,    # Very fast decay
-    sustain_level=0.0,  # No sustain for overtones
-    release_time=0.1,   # Very fast release
+    attack_time=0.01,
+    decay_time=0.05,
+    sustain_level=0.0,
+    release_time=0.1,
 )
 
 # --- Custom Sine Waveform Generation ---
@@ -49,8 +49,8 @@ def generate_sine_waveform(length=512, scale=1.0):
     return waveform
 
 # Create two sine waveforms with different volumes for additive synthesis.
-active_waveform_full_volume = generate_sine_waveform(scale=1.0)  # For the fundamental note
-active_waveform_overtone_volume = generate_sine_waveform(scale=0.5) # For the overtone (adjust 0.5 for desired loudness)
+active_waveform_full_volume = generate_sine_waveform(scale=1.0)
+active_waveform_overtone_volume = generate_sine_waveform(scale=0.5)
 
 # Define MIDI notes for a 16-key layout, shifted one octave higher for a xylophone range.
 MIDI_NOTES = [
